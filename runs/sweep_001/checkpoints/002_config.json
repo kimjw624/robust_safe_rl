@@ -1,0 +1,11 @@
+{
+  "hidden_dims": [
+    128,
+    64
+  ],
+  "latent_dim": 2,
+  "activation": "relu",
+  "lr": 0.0003,
+  "weight_decay": 1e-06,
+  "batch_size": 2048
+}
