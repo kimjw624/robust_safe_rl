@@ -1,0 +1,14 @@
+{
+  "hidden_dims": [
+    256,
+    128,
+    64
+  ],
+  "latent_dim": 6,
+  "activation": "elu",
+  "lr": 0.0003,
+  "weight_decay": 1e-06,
+  "batch_size": 2048,
+  "regularizer": "sparse",
+  "reg_lambda": 0.0001
+}

@@ -36,7 +36,7 @@ def main():
     parser.add_argument("--tf", type=float, default=10.0)
     parser.add_argument("--id_episodes", type=int, default=50)
     parser.add_argument("--ood_episodes", type=int, default=50)
-    parser.add_argument("--history_len", type=int, default=3)
+    parser.add_argument("--history_len", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=999)
 
@@ -54,7 +54,7 @@ def main():
 
     print(f"Loading checkpoint: {ckpt_path}")
 
-    model, mean, std, thresholds = AutoEncoder.load(
+    model, mean, std, thresholds, metadata = AutoEncoder.load(
         ckpt_path,
         map_location=device,
     )
@@ -68,7 +68,20 @@ def main():
     mean = mean.to("cpu")
     std = std.to("cpu")
 
-    episode_steps = int(args.tf / args.dt)
+    checkpoint_history_len = metadata.get("history_len")
+    checkpoint_feature_version = metadata.get("feature_version")
+    if checkpoint_feature_version != 2:
+        raise RuntimeError(
+            "This checkpoint uses the old/missing feature definition. "
+            "Retrain it with the corrected transition-aligned 16-D features."
+        )
+    if checkpoint_history_len != args.history_len:
+        raise ValueError(
+            f"history_len mismatch: checkpoint={checkpoint_history_len}, "
+            f"requested={args.history_len}."
+        )
+
+    episode_steps = int(round(args.tf / args.dt))
 
     print("Collecting test ID data: random_force=1, [-3, 3] N")
 

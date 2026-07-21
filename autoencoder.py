@@ -10,7 +10,7 @@ class AutoEncoder(nn.Module):
 
     Example:
         model = AutoEncoder(
-            input_dim=66,
+            input_dim=48,
             hidden_dims=(128, 64),
             latent_dim=3,
             activation="relu",
@@ -97,7 +97,7 @@ class AutoEncoder(nn.Module):
 
         return mse_per_sample, z
 
-    def save(self, path, mean=None, std=None, thresholds=None):
+    def save(self, path, mean=None, std=None, thresholds=None, metadata=None):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -110,6 +110,7 @@ class AutoEncoder(nn.Module):
             "mean": None if mean is None else mean.detach().cpu(),
             "std": None if std is None else std.detach().cpu(),
             "thresholds": {} if thresholds is None else thresholds,
+            "metadata": {} if metadata is None else metadata,
         }
 
         torch.save(payload, path)
@@ -133,4 +134,6 @@ class AutoEncoder(nn.Module):
         std = payload.get("std")
         thresholds = payload.get("thresholds", {})
 
-        return model, mean, std, thresholds
+        metadata = payload.get("metadata", {})
+
+        return model, mean, std, thresholds, metadata

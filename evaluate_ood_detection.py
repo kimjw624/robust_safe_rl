@@ -9,6 +9,7 @@ from train_autoencoder import (
     collect_dataset,
     apply_standardization,
     evaluate_errors,
+    save_training_plots,
 )
 
 
@@ -203,7 +204,7 @@ def main():
 
     parser.add_argument("--dt", type=float, default=0.01)
     parser.add_argument("--tf", type=float, default=10.0)
-    parser.add_argument("--history_len", type=int, default=3)
+    parser.add_argument("--history_len", type=int, default=10)
 
     parser.add_argument("--id_episodes", type=int, default=50)
     parser.add_argument("--ood_episodes", type=int, default=50)
@@ -225,7 +226,7 @@ def main():
 
     print(f"Loading checkpoint: {ckpt_path}")
 
-    model, mean, std, thresholds = AutoEncoder.load(
+    model, mean, std, thresholds, metadata = AutoEncoder.load(
         ckpt_path,
         map_location=device,
     )
@@ -239,7 +240,20 @@ def main():
     mean = mean.cpu()
     std = std.cpu()
 
-    episode_steps = int(args.tf / args.dt)
+    checkpoint_history_len = metadata.get("history_len")
+    checkpoint_feature_version = metadata.get("feature_version")
+    if checkpoint_feature_version != 2:
+        raise RuntimeError(
+            "This checkpoint uses the old/missing feature definition. "
+            "Retrain it with the corrected transition-aligned 16-D features."
+        )
+    if checkpoint_history_len != args.history_len:
+        raise ValueError(
+            f"history_len mismatch: checkpoint={checkpoint_history_len}, "
+            f"requested={args.history_len}."
+        )
+
+    episode_steps = int(round(args.tf / args.dt))
 
     print("\nCollecting labeled ID test data")
     print("ID label = 0, force in [-3, 3] N")
@@ -332,14 +346,16 @@ def main():
         threshold=threshold,
     )
 
-    save_eval_plots(
+    plotting_thresholds = dict(thresholds)
+    plotting_thresholds.setdefault("id_p99", float(np.percentile(id_errors, 99.0)))
+    save_training_plots(
         plot_dir=args.plot_dir,
-        index=args.index,
+        run_idx=args.index,
         id_errors=id_errors,
         ood_errors=ood_errors,
         id_latent=id_latent,
         ood_latent=ood_latent,
-        threshold=threshold,
+        thresholds=plotting_thresholds,
     )
 
     print(f"\nSaved evaluation plots to: {args.plot_dir}")

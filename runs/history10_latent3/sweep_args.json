@@ -1,0 +1,19 @@
+{
+  "dt": 0.01,
+  "tf": 10.0,
+  "train_episodes": 500,
+  "val_episodes": 100,
+  "ood_episodes": 100,
+  "history_len": 10,
+  "hidden_dims_grid": "128,64;256,128,64;512,256,128,64",
+  "latent_dims": "3",
+  "activations": "elu",
+  "learning_rates": "3e-4",
+  "weight_decays": "1e-6",
+  "batch_sizes": "2048",
+  "epochs": 800,
+  "seed": 1,
+  "force_sample_each_step": false,
+  "sweep_dir": "runs/history10_latent3",
+  "max_runs": -1
+}

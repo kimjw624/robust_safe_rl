@@ -15,6 +15,7 @@ from train_autoencoder import (
     evaluate_errors,
     detection_report,
     save_training_plots,
+    feature_metadata,
 )
 
 
@@ -122,6 +123,7 @@ def train_one_model(
     best_val = float("inf")
     best_state = None
     best_epoch = 0
+    epochs_without_improvement = 0
 
     print("")
     print("=" * 80)
@@ -163,13 +165,18 @@ def train_one_model(
         history["train_mse"].append(train_loss)
         history["val_mse"].append(val_loss)
 
-        if val_loss < best_val:
+        improved = val_loss < (best_val - train_one_model.min_delta)
+
+        if improved:
             best_val = val_loss
             best_epoch = epoch
             best_state = {
                 k: v.detach().cpu().clone()
                 for k, v in model.state_dict().items()
             }
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
 
         if epoch == 1 or epoch % 50 == 0 or epoch == epochs:
             print(
@@ -179,6 +186,13 @@ def train_one_model(
                 f"val mse {val_loss:.6e} | "
                 f"best val {best_val:.6e} at epoch {best_epoch}"
             )
+
+        if epochs_without_improvement >= train_one_model.patience:
+            print(
+                f"run {run_idx:03d} | early stopping at epoch {epoch}; "
+                f"best validation MSE was {best_val:.6e} at epoch {best_epoch}"
+            )
+            break
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -211,7 +225,10 @@ def train_one_model(
         "lr": float(config["lr"]),
         "weight_decay": float(config["weight_decay"]),
         "batch_size": int(config["batch_size"]),
-        "epochs": int(epochs),
+        "epochs_requested": int(epochs),
+        "epochs_completed": int(history["epoch"][-1]),
+        "early_stopping_patience": int(train_one_model.patience),
+        "early_stopping_min_delta": float(train_one_model.min_delta),
         "best_epoch": int(best_epoch),
         "best_val_mse": float(best_val),
 
@@ -243,6 +260,7 @@ def train_one_model(
         mean=train_one_model.mean,
         std=train_one_model.std,
         thresholds=thresholds,
+        metadata=feature_metadata(train_one_model.history_len),
     )
 
     payload = torch.load(checkpoint_path, map_location="cpu")
@@ -329,21 +347,23 @@ def main():
     parser.add_argument("--val_episodes", type=int, default=200)
     parser.add_argument("--ood_episodes", type=int, default=200)
 
-    parser.add_argument("--history_len", type=int, default=3)
+    parser.add_argument("--history_len", type=int, default=10)
 
     parser.add_argument(
         "--hidden_dims_grid",
         type=str,
-        default="128,64;256,128,64;512,256,128,64",
+        default="256,128,64",
     )
 
-    parser.add_argument("--latent_dims", type=str, default="2,3,4,6")
-    parser.add_argument("--activations", type=str, default="relu,elu")
-    parser.add_argument("--learning_rates", type=str, default="5e-4,3e-4")
+    parser.add_argument("--latent_dims", type=str, default="3,6,12")
+    parser.add_argument("--activations", type=str, default="elu")
+    parser.add_argument("--learning_rates", type=str, default="3e-4")
     parser.add_argument("--weight_decays", type=str, default="1e-6")
     parser.add_argument("--batch_sizes", type=str, default="2048")
 
-    parser.add_argument("--epochs", type=int, default=2000)
+    parser.add_argument("--epochs", type=int, default=800)
+    parser.add_argument("--patience", type=int, default=80)
+    parser.add_argument("--min_delta", type=float, default=1e-7)
 
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--force_sample_each_step", action="store_true")
@@ -371,7 +391,7 @@ def main():
 
     print("")
     print("=" * 80)
-    print("Autoencoder hyperparameter sweep")
+    print("Autoencoder latent-dimension sweep")
     print("=" * 80)
     print(f"device: {device}")
     print(f"number of configs: {len(configs)}")
@@ -446,6 +466,9 @@ def main():
 
     train_one_model.mean = mean
     train_one_model.std = std
+    train_one_model.history_len = args.history_len
+    train_one_model.patience = args.patience
+    train_one_model.min_delta = args.min_delta
 
     train_x = train_x.to(device)
     val_x = val_x.to(device)
