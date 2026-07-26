@@ -1,0 +1,143 @@
+# robust_safe_rl
+
+Residual-RL quadrotor control with **OOD-gated residuals** on SE(3).
+
+## Motivation
+
+A residual RL controller is added on top of a base geometric SE(3) controller to
+improve tracking under disturbances (wind forces, mass / moment-of-inertia
+error). Residual RL helps **in-distribution** but can degrade — sometimes below
+the baseline — when the state leaves the training distribution.
+
+The goal of this project is a residual controller that is **gated by an OOD
+detector**:
+
+1. **Detect** when the current state/disturbance is out of the training domain.
+2. Apply the **residual only in-distribution**.
+3. **Fall back** when OOD (disable the residual / revert to the base controller /
+   online-update / safe action).
+
+This repository currently contains the base control stack, the simulator, and
+the first OOD detector. The residual policy and the gating logic build on top.
+
+## Layout
+
+```
+src/robust_safe_rl/
+├── core/                      Physics + control (no learning)
+│   ├── so3.py                 hat / vee / project_to_so3 / log / normalize
+│   ├── dynamics.py            NED quadrotor RK4 dynamics + force disturbance
+│   ├── controller.py          Geometric SE(3) tracking controller (base policy)
+│   └── trajectory.py          Circular desired trajectory in NED
+│
+├── ood/                       Out-of-distribution detection
+│   ├── shared/                Detector-agnostic building blocks
+│   │   ├── features.py        Transition-aligned residual features + metadata
+│   │   ├── dataset.py         Rollout collection (force & mass/MOI) + scaling
+│   │   ├── metrics.py         Reconstruction/score metrics, thresholds, ROC/PR
+│   │   ├── plots.py           Shared diagnostic plotting
+│   │   └── io_utils.py        Indexed checkpoint helpers
+│   │
+│   ├── ood_autoencoder/       Detector 1: reconstruction autoencoder
+│   │   ├── autoencoder.py     MLP autoencoder with save/load
+│   │   └── regularization.py  Optional sparse / contractive latent penalties
+│   │
+│   └── ood_residual/          Detector 2: residual-dynamics predictor (PLANNED)
+│
+└── scripts/                   Runnable entry points (python -m ...)
+    ├── run_tracking_demo.py       Closed-loop tracking sanity check + plots
+    ├── train_autoencoder.py       Train one force-OOD autoencoder detector
+    ├── test_autoencoder.py        Re-test a checkpoint on fresh ID/OOD data
+    ├── evaluate_ood_detection.py  Confusion-matrix report (force OOD)
+    ├── evaluate_mass_moi_ood.py   Cross-type (mass/MOI) OOD evaluation
+    └── sweep_autoencoder.py       Hyperparameter + regularization grid sweep
+```
+
+## Install
+
+```bash
+pip install -e .
+```
+
+Requires Python >= 3.9, `numpy`, `torch`, `matplotlib`.
+
+## Quick start
+
+Verify the base controller tracks the reference trajectory:
+
+```bash
+python -m robust_safe_rl.scripts.run_tracking_demo
+```
+
+Train an autoencoder OOD detector (ID force in [-3, 3] N, strict-OOD force with
+at least one axis > 3 N):
+
+```bash
+python -m robust_safe_rl.scripts.train_autoencoder \
+    --history_len 10 --latent_dim 6 \
+    --run_dir runs --plot_dir runs/plots
+```
+
+Evaluate a trained checkpoint by index:
+
+```bash
+python -m robust_safe_rl.scripts.evaluate_ood_detection --index 1 --run_dir runs
+python -m robust_safe_rl.scripts.evaluate_mass_moi_ood  --index 1 --run_dir runs
+```
+
+Grid sweep (optionally with latent regularizers):
+
+```bash
+python -m robust_safe_rl.scripts.sweep_autoencoder \
+    --latent_dims 3,6,12 --regularizers none,sparse \
+    --sparse_lambdas 1e-4,1e-3 --sweep_dir runs/sweep_001
+```
+
+## Detection features
+
+Each sample is `history_len` consecutive 16-D step features stacked together.
+A step feature compares a **true** (possibly disturbed) rollout against a
+**nominal** rollout that receives the identical commanded action over the same
+step, pairing the action at time *t* with the resulting state discrepancy at
+*t+1*:
+
+```
+[ position_error(3), velocity_error(3),
+  relative_rotation_vector(3), angular_velocity_error(3),
+  commanded_action(f, Mx, My, Mz)(4) ]
+```
+
+Sign convention: `nominal_next - true_next`; relative attitude encoded as
+`Log(R_true_next^T @ R_nominal_next)`.
+
+## Detector 1: autoencoder (implemented)
+
+An MLP autoencoder is trained on in-distribution features. A sample is flagged
+OOD from two signals: (a) reconstruction error exceeding the ID outlier
+reconstruction error, and (b) its location in latent space relative to the ID
+latent cluster.
+
+**Known limitation.** This detector does **not** reliably separate *same-type*
+out-of-range force disturbances (strict force OOD). Its separation shows up
+mainly for a *different* disturbance type (mass / MOI OOD). Detecting subtle,
+same-type OOD is what motivates Detector 2.
+
+## Detector 2: residual dynamics (planned — `ood/ood_residual/`)
+
+Predict the next residual state from a history of states and actions. In
+distribution, the one-step prediction is accurate; out of distribution, the true
+next state and the predicted residual diverge, and that prediction error is the
+OOD signal. This detector will reuse `ood/shared/` (features, datasets, metrics,
+plots) so the two detectors stay directly comparable.
+
+## Notes
+
+- Dynamics use a North-East-Down (NED) frame, so `z = -1.0` means 1 m above the
+  origin, and `b3` points down (opposite total thrust).
+- Controller gains `kx`, `kv` are mass-scaled; the desired angular velocity and
+  its derivative come from finite-differencing the desired attitude, so the
+  first one or two steps after a reset use zero feedforward.
+- Checkpoints are written with an auto-incrementing `NNN_` prefix and carry
+  their normalization stats, thresholds, and feature metadata; test/eval scripts
+  assert on `feature_version` and `history_len` for compatibility.
+```
