@@ -47,6 +47,11 @@ class Dynamics:
         self.J = np.diag([0.022, 0.022, 0.04]) if J is None else np.asarray(J, dtype=float)
         self.gravity = float(gravity)
 
+        # Nominal (base) inertial params. A per-episode scalar multiplier k
+        # rescales BOTH mass and inertia from these bases (see set_inertial_scale).
+        self._mass_base = self.mass
+        self._J_base = self.J.copy()
+
         self.random_force = int(random_force)
         self.force_sample_each_step = bool(force_sample_each_step)
 
@@ -73,6 +78,18 @@ class Dynamics:
         self.last_external_force = self.external_force.copy()
 
         return self.state()
+
+    def set_inertial_scale(self, k):
+        """Scale mass and inertia by a common factor k relative to the nominal base.
+
+        m <- k * m_base,  J <- k * J_base. Called by the env at reset to inject the
+        mass/MOI disturbance. Always rescales from the stored base, so repeated calls
+        do not compound.
+        """
+        k = float(k)
+        self.mass = k * self._mass_base
+        self.J = k * self._J_base
+        return self
 
     def state(self):
         return {

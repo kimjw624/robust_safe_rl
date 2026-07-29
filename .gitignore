@@ -1,0 +1,5 @@
+runs_residual/
+runs/
+*.pt
+__pycache__/
+*.pyc
