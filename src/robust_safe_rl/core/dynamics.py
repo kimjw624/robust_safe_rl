@@ -154,6 +154,28 @@ class Dynamics:
             R_dot.reshape(9),
             omega_dot,
         ])
+    
+    def accel_at(self, R, v, omega, f, M, mass=None, J=None, external_force=None):
+        """Acceleration (v_dot, omega_dot) at a GIVEN state and control, under
+        chosen mass/inertia. Used to build residual-dynamics training targets:
+        evaluate once with the true (disturbed) mass/J and once with the nominal
+        mass/J at the SAME state, and subtract.
+
+        Falls back to this object's current mass/J/external_force when not given.
+        Does not modify or advance the state.
+        """
+        m = self.mass if mass is None else float(mass)
+        Jm = self.J if J is None else np.asarray(J, dtype=float)
+        fext = self.external_force if external_force is None else \
+            np.asarray(external_force, dtype=float).reshape(3)
+
+        R = np.asarray(R, dtype=float).reshape(3, 3)
+        omega = np.asarray(omega, dtype=float).reshape(3)
+        M = np.asarray(M, dtype=float).reshape(3)
+
+        v_dot = self.gravity * self.e3 - (float(f) / m) * (R @ self.e3) + fext / m
+        omega_dot = np.linalg.solve(Jm, M - np.cross(omega, Jm @ omega))
+        return v_dot, omega_dot
 
     def step(self, f, M):
         if self.force_sample_each_step:

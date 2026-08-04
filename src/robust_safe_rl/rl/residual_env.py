@@ -9,10 +9,11 @@ Two rigid-body plants are stepped in lockstep from the same initial condition:
                    k_max]. Driven by the base controller (which still uses the
                    NOMINAL m, J -- it does not know k) PLUS the learned residual.
 
-The agent observes a length-H history of frames, each frame being the
-nominal-minus-true state discrepancy together with the residual and total
-control that produced it. The reward drives the true plant to track the nominal
-twin (not the mathematical desired trajectory) -- the DOB objective. The
+The agent's observation is produced by an ObservationBuilder (see obs_builders),
+which supports three modes: the original H-frame "history" stack, a compact "pid"
+mode (PID errors on the twin discrepancy + base control), and "pid_hist" (PID
+plus a short discrepancy tail). The reward drives the true plant to track the
+nominal twin (not the mathematical desired trajectory) -- the DOB objective. The
 residual exists solely to cancel the effect of k.
 
 Each plant gets its OWN Controller instance: the geometric controller keeps
@@ -29,13 +30,8 @@ import numpy as np
 
 from robust_safe_rl.core import Controller, DesiredTrajectory, Dynamics
 from robust_safe_rl.core.so3 import rotation_error
+from robust_safe_rl.rl.obs_builders import ObservationBuilder
 
-
-# Per-frame layout: [ dx(3) dv(3) dR(3) domega(3) | residual(4) | u_total(4) ]
-FRAME_STATE = 12
-FRAME_ACTION = 4
-FRAME_TOTAL_U = 4
-FRAME_DIM = FRAME_STATE + FRAME_ACTION + FRAME_TOTAL_U  # 20
 ACTION_DIM = 4
 
 
@@ -44,11 +40,14 @@ class ResidualTwinEnv:
 
     def __init__(self, cfg, seed=None):
         self.cfg = cfg
-        self.H = cfg.history
-        self.obs_dim = self.H * FRAME_DIM
         self.action_dim = ACTION_DIM
 
         self.action_scale = np.asarray(cfg.action_scale, dtype=np.float64)
+
+        # Observation is delegated to the builder, which owns the obs_mode logic
+        # (history stack / pid / pid_hist) and reports the flattened dimension.
+        self.obs_builder = ObservationBuilder(cfg)
+        self.obs_dim = self.obs_builder.obs_dim
 
         J_nom = np.diag(np.asarray(cfg.J_nom, dtype=float))
 
@@ -78,7 +77,6 @@ class ResidualTwinEnv:
         self.t = 0.0
         self.step_idx = 0
         self.k = 1.0
-        self._frames = None  # ring of the last H frames, oldest first
 
     # ------------------------------------------------------------------ reset
     def reset(self, k=None):
@@ -101,10 +99,10 @@ class ResidualTwinEnv:
         self.ctrl_true.reset()
         self.ctrl_nom.reset()
 
-        # History starts zero-padded.
-        self._frames = np.zeros((self.H, FRAME_DIM), dtype=np.float64)
+        # Reset observation state (history buffer / PID integrals / tail).
+        self.obs_builder.reset()
 
-        return self._get_obs()
+        return self.obs_builder.get()
 
     # ------------------------------------------------------------------- step
     def step(self, action):
@@ -136,31 +134,27 @@ class ResidualTwinEnv:
         self.step_idx += 1
         self.t = self.step_idx * self.cfg.dt
 
-        # Build the new history frame from the post-step discrepancy.
+        # Feed the observation builder: post-step states, the residual and total
+        # control applied to the true plant, and the base control (u_base) that
+        # the PID modes use as context.
         u_total = np.array([f_true, M_true[0], M_true[1], M_true[2]])
-        frame = self._make_frame(sn_next, st_next, u_res, u_total)
-        self._frames = np.roll(self._frames, -1, axis=0)
-        self._frames[-1] = frame
+        u_base = np.array([f_t, M_t[0], M_t[1], M_t[2]])
+        self.obs_builder.push(sn_next, st_next, u_res, u_total, u_base)
 
         reward = self._reward(sn_next, st_next)
 
         terminated = self._check_terminated(sn_next, st_next)
         truncated = self.step_idx >= self.cfg.episode_steps
 
-        info = {"k": self.k, "pos_err": float(np.linalg.norm(sn_next["x"] - st_next["x"]))}
-        return self._get_obs(), reward, terminated, truncated, info
+        info = {
+            "k": self.k,
+            "pos_err": float(np.linalg.norm(sn_next["x"] - st_next["x"])),
+            "residual": u_res.copy(),
+            "u_total": u_total.copy(),
+        }
+        return self.obs_builder.get(), reward, terminated, truncated, info
 
     # -------------------------------------------------------------- internals
-    def _make_frame(self, sn, st, u_res, u_total):
-        dx = sn["x"] - st["x"]
-        dv = sn["v"] - st["v"]
-        dR = rotation_error(st["R"], sn["R"])       # attitude discrepancy (nominal vs true)
-        dw = sn["omega"] - st["omega"]
-        return np.concatenate([dx, dv, dR, dw, u_res, u_total]).astype(np.float64)
-
-    def _get_obs(self):
-        return self._frames.reshape(-1).astype(np.float32)
-
     def _reward(self, sn, st):
         c = self.cfg
         dx = np.linalg.norm(sn["x"] - st["x"]) ** 2

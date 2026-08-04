@@ -175,6 +175,16 @@ def collect_parameter_dataset(
         history = deque(maxlen=history_len)
 
         for k in range(episode_steps):
+            # Divergence guard: the light-drone (mass_scale < 1) case makes the
+            # nominal-parameter base controller over-thrust and tumble, which
+            # overflows the rotation integration and crashes project_to_so3's SVD.
+            # Stop the episode before that happens so we log only valid samples.
+            if (not np.all(np.isfinite(true_state["x"]))
+                    or np.linalg.norm(true_state["v"]) > 10.0
+                    or np.linalg.norm(true_state["omega"]) > 10.0
+                    or true_state["R"][2, 2] < 0.5):   # >60 deg tilt
+                break
+
             desired = traj.desired(k * dt)
             f_cmd, M_cmd, _ = controller.compute_control(true_state, desired)
             action = np.array([f_cmd, *M_cmd], dtype=float)

@@ -30,7 +30,15 @@ class EnvConfig:
     k_max: float = 1.5
 
     # --- history stacking ---
-    history: int = 10                  # H: number of stacked frames
+    history: int = 10                  # H: number of stacked frames (used by obs_mode="history" and the tail of "pid_hist")
+
+    # --- observation mode ---
+    #   "history"  : original H-frame stack of [discrepancy, residual, u_total]  (baseline)
+    #   "pid"      : PID errors on the twin discrepancy + u_base           (mode A, minimal)
+    #   "pid_hist" : PID errors + u_base + a short raw-discrepancy tail    (mode B, ablation)
+    obs_mode: str = "history"
+    pid_integral_leak: float = 0.99    # lambda for the leaky integral: I <- lambda*I + e*dt
+    pid_hist_frames: int = 3           # length of the short discrepancy tail in "pid_hist" mode
 
     # --- termination (no penalty yet; just ends the episode) ---
     term_pos_error: float = 2.0        # metres
@@ -41,7 +49,7 @@ class EnvConfig:
     w_vel: float = 0.2
     w_att: float = 0.2
     w_omega: float = 0.2
-    tau_pos: float = 0.2        # DEFAULT = 0.3
+    tau_pos: float = 0.3
     tau_vel: float = 0.5
     tau_att: float = 0.5
     tau_omega: float = 1.0
@@ -87,7 +95,7 @@ class Config:
     sac: SACConfig = field(default_factory=SACConfig)
     net: NetConfig = field(default_factory=NetConfig)
     seed: int = 0
-    device: str = "cuda"                # "cuda" if available
+    device: str = "cpu"                # "cuda" if available
     eval_every: int = 20_000
     checkpoint_every: int = 50_000
 
@@ -97,6 +105,6 @@ class Config:
     #   training log:   log.json
     #   config dump:    config.json
     # trial_<N> auto-increments so re-running the same run_name never overwrites.
-    runs_root: str = "runs_residual"
-    run_name: str = "residual_sac_tau0.2"
+    runs_root: str = "runs_residual_PID"
+    run_name: str = "residual_sac"
     trial: int = None                  # None -> auto-pick next free index

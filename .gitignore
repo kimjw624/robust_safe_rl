@@ -1,5 +1,23 @@
-runs_residual/
-runs/
+# trained agents / checkpoints
 *.pt
+*.pth
+
+# run outputs (all components)
+runs/
+runs_residual/
+runs_residual_PID/
+runs_residual_Both/
+runs_dynamics/
+runs_autoencoder/
+runs_detector_residual_mid_eval/
+runs_phase1/
+runs_phase2/
+runs_phase3/
+
+# collected datasets
+data/
+*.npz
+
+# python
 __pycache__/
 *.pyc

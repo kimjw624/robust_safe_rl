@@ -7,6 +7,7 @@ Usage (from the package root, with robust_safe_rl importable):
 Reference: CleanRL sac_continuous_action. Single environment, off-policy.
 """
 
+import argparse
 import json
 import os
 import time
@@ -113,5 +114,64 @@ def main(cfg=None):
     print(f"done. final checkpoint -> {final_path}")
 
 
+def build_config_from_args(args):
+    """Start from defaults, overlay any CLI overrides that were given."""
+    cfg = Config()
+
+    # top-level
+    if args.run_name is not None:      cfg.run_name = args.run_name
+    if args.trial is not None:         cfg.trial = args.trial
+    if args.seed is not None:          cfg.seed = args.seed
+    if args.device is not None:        cfg.device = args.device
+    if args.runs_root is not None:     cfg.runs_root = args.runs_root
+
+    # sac
+    if args.total_timesteps is not None:  cfg.sac.total_timesteps = args.total_timesteps
+    if args.lr_actor is not None:         cfg.sac.lr_actor = args.lr_actor
+    if args.lr_critic is not None:        cfg.sac.lr_critic = args.lr_critic
+    if args.gamma is not None:            cfg.sac.gamma = args.gamma
+    if args.batch_size is not None:       cfg.sac.batch_size = args.batch_size
+    if args.target_entropy_scale is not None:
+        cfg.sac.target_entropy_scale = args.target_entropy_scale
+
+    # env
+    if args.tau_pos is not None:          cfg.env.tau_pos = args.tau_pos
+    if args.reward_norm is not None:      cfg.env.reward_norm = args.reward_norm
+    if args.obs_mode is not None:         cfg.env.obs_mode = args.obs_mode
+    if args.pid_integral_leak is not None: cfg.env.pid_integral_leak = args.pid_integral_leak
+
+    # net
+    if args.hidden is not None:           cfg.net.hidden = tuple(args.hidden)
+
+    return cfg
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Train residual SAC (all args optional; "
+                                            "unset ones use config.py defaults).")
+    p.add_argument("--run_name", default=None,
+                   help="experiment name; artifacts go to <runs_root>/<run_name>/trial_<N>/")
+    p.add_argument("--trial", type=int, default=None, help="force a trial index")
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--device", default=None, help="cpu or cuda")
+    p.add_argument("--runs_root", default=None)
+    # common knobs to sweep overnight
+    p.add_argument("--total_timesteps", type=int, default=None)
+    p.add_argument("--lr_actor", type=float, default=None)
+    p.add_argument("--lr_critic", type=float, default=None)
+    p.add_argument("--gamma", type=float, default=None)
+    p.add_argument("--batch_size", type=int, default=None)
+    p.add_argument("--target_entropy_scale", type=float, default=None)
+    p.add_argument("--tau_pos", type=float, default=None, help="reward position sigma")
+    p.add_argument("--reward_norm", type=float, default=None)
+    p.add_argument("--obs_mode", default=None, choices=["history", "pid", "pid_hist"],
+                   help="observation mode: history stack (baseline), pid, or pid_hist")
+    p.add_argument("--pid_integral_leak", type=float, default=None,
+                   help="leaky-integral lambda for pid modes (e.g. 0.99)")
+    p.add_argument("--hidden", type=int, nargs="+", default=None,
+                   help="hidden layer widths, e.g. --hidden 512 512")
+    return p.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    main(build_config_from_args(parse_args()))

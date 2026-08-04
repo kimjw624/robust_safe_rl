@@ -74,10 +74,9 @@ def rollout(agent, cfg, k, use_residual=True):
 
         obs, r, term, trunc, info = env.step(a)
 
-        # the frame just written holds residual (physical) and total u
-        frame = env._frames[-1]
-        residual.append(frame[12:16].copy())
-        u_total.append(frame[16:20].copy())
+        # residual (physical units) and total control now come from step info
+        residual.append(np.asarray(info["residual"]).copy())
+        u_total.append(np.asarray(info["u_total"]).copy())
         pos_err.append(info["pos_err"])
 
         step += 1

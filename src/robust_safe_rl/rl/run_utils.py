@@ -40,6 +40,17 @@ def resolve_run_dir(cfg, create=True):
     return run_dir, trial
 
 
+def resolve_run_dir_args(runs_root, run_name, trial=None, create=True):
+    """Same as resolve_run_dir but from plain strings (for scripts that don't
+    carry a Config object, e.g. the residual-dynamics trainer). Auto-increments
+    the trial index when trial is None. Returns (run_dir, trial_index)."""
+    t = trial if trial is not None else next_trial_index(runs_root, run_name)
+    run_dir = os.path.join(runs_root, run_name, f"trial_{t}")
+    if create:
+        os.makedirs(run_dir, exist_ok=True)
+    return run_dir, t
+
+
 def checkpoint_name(run_name, trial, step=None):
     """Checkpoint filename: final if step is None, else step-tagged."""
     if step is None:

@@ -176,9 +176,13 @@ def main():
 
     parser.add_argument("--index", type=int, required=True)
 
-    parser.add_argument("--run_dir", type=str, default="runs")
+    parser.add_argument("--runs_root", type=str, default="runs_autoencoder")
+    parser.add_argument("--run_name", type=str, default="ae_disturbance")
+    parser.add_argument("--trial", type=int, default=1,
+                        help="trial index of the trained model to evaluate")
     parser.add_argument("--suffix", type=str, default="ae_disturbance.pt")
-    parser.add_argument("--plot_dir", type=str, default="runs/eval_plots")
+    parser.add_argument("--eval_tag", type=str, default=None,
+                        help="subfolder name under the trial's eval/ (default: eval)")
 
     parser.add_argument("--dt", type=float, default=0.01)
     parser.add_argument("--tf", type=float, default=10.0)
@@ -196,8 +200,16 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # Load the model from its organized trial folder, and write eval artifacts
+    # into that same folder's eval/ subdir (like runs_dynamics/.../eval/).
+    import os
+    trial_dir = os.path.join(args.runs_root, args.run_name, f"trial_{args.trial}")
+    eval_dir = os.path.join(trial_dir, "eval", args.eval_tag or "eval")
+    os.makedirs(eval_dir, exist_ok=True)
+    args.plot_dir = eval_dir  # downstream plotting uses args.plot_dir
+
     ckpt_path = get_checkpoint_by_index(
-        run_dir=args.run_dir,
+        run_dir=trial_dir,
         index=args.index,
         suffix=args.suffix,
     )
