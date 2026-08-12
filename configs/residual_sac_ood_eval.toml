@@ -1,0 +1,90 @@
+# OOD / extrapolation evaluation suite for residual SAC.
+#
+# This file is evaluation-only. `timesteps` is required by the curriculum parser
+# but is ignored by scripts/evaluate_residual_report.py.
+#
+# Training support was:
+#   k:                    [0.70, 1.30]
+#   external force:       each axis in [-3, +3] N
+#   motor coeff scale:    [0.70, 1.30]
+#   moment coeff scale:   [0.70, 1.30]
+#   arm-length scale:     [0.70, 1.30]
+#   actuator parameters:  global/common across the four rotors
+#
+# Stages below deliberately go beyond those ranges. Low/high stages use ranges
+# disjoint from training support so they are genuinely extrapolative for the
+# named multiplicative parameter. The force stage uses +/-5 N, which is a
+# broader distribution but can still draw some forces inside the training box.
+# The asymmetric stage is structurally OOD because each rotor is randomized
+# independently (`per_motor_params = true`).
+
+rehearsal_probability = 0.0
+rehearsal_mode = "uniform_previous"
+evaluation_episodes_per_stage = 1
+
+[[stages]]
+name = "ood_mass_low"
+timesteps = 1
+disturbances = ["massmoi"]
+k_min = 0.55
+k_max = 0.69
+
+[[stages]]
+name = "ood_mass_high"
+timesteps = 1
+disturbances = ["massmoi"]
+k_min = 1.31
+k_max = 1.45
+
+[[stages]]
+name = "ood_force_broader"
+timesteps = 1
+disturbances = ["massmoi", "force"]
+k_min = 0.70
+k_max = 1.30
+external_force_max = 5.0
+
+[[stages]]
+name = "ood_all_low_global"
+timesteps = 1
+disturbances = ["massmoi", "force", "motor_coeff", "moment_coeff", "arm_length"]
+k_min = 0.55
+k_max = 0.69
+external_force_max = 5.0
+motor_coeff_min = 0.55
+motor_coeff_max = 0.69
+moment_coeff_min = 0.55
+moment_coeff_max = 0.69
+arm_length_min = 0.55
+arm_length_max = 0.69
+per_motor_params = false
+
+[[stages]]
+name = "ood_all_high_global"
+timesteps = 1
+disturbances = ["massmoi", "force", "motor_coeff", "moment_coeff", "arm_length"]
+k_min = 1.31
+k_max = 1.45
+external_force_max = 5.0
+motor_coeff_min = 1.31
+motor_coeff_max = 1.45
+moment_coeff_min = 1.31
+moment_coeff_max = 1.45
+arm_length_min = 1.31
+arm_length_max = 1.45
+per_motor_params = false
+
+[[stages]]
+name = "ood_asymmetric_per_motor"
+timesteps = 1
+disturbances = ["massmoi", "force", "motor_coeff", "moment_coeff", "arm_length"]
+k_min = 0.60
+k_max = 1.40
+external_force_max = 5.0
+motor_coeff_min = 0.60
+motor_coeff_max = 1.40
+moment_coeff_min = 0.60
+moment_coeff_max = 1.40
+arm_length_min = 0.60
+arm_length_max = 1.40
+per_motor_params = true

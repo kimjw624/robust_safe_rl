@@ -2,8 +2,17 @@
 
 This is the baseline (nominal) controller. It follows the structure of Lee,
 Leok, and McClamroch (CDC 2010), adapted to the NED convention used by
-:class:`~robust_safe_rl.core.dynamics.Dynamics`. In the residual-RL framework
-this controller is the base policy that a learned residual is added on top of.
+:class:`~robust_safe_rl.core.dynamics.Dynamics`.
+
+For residual-RL experiments the controller also supports an optional
+*force-vector residual* ``delta_A`` inserted at the translational-force level:
+
+    A_cmd = A_base + delta_A
+
+The modified ``A_cmd`` is then used by the normal geometric construction of
+``Rd``, collective thrust, desired angular velocity, and moment.  This keeps the
+learned correction upstream of the attitude controller instead of adding a
+second moment controller in parallel.
 
 The desired angular velocity and its derivative are obtained by finite-
 differencing the desired attitude ``Rd``, so the first one or two steps after a
@@ -39,7 +48,23 @@ class Controller:
         self.Rd_prev = None
         self.omega_d_prev = np.zeros(3)
 
-    def compute_control(self, state, desired):
+    def compute_control(self, state, desired, force_residual=None, update_history=True):
+        """Compute collective thrust and body moment.
+
+        Parameters
+        ----------
+        state, desired:
+            Same dictionaries used by the original controller.
+        force_residual:
+            Optional 3-D correction ``delta_A`` in NED/world force coordinates,
+            in newtons.  The controller uses ``A_cmd = A_base + delta_A`` before
+            constructing the desired attitude.  ``None`` is exactly the legacy
+            controller behavior.
+        update_history:
+            If ``False``, compute a preview without advancing the finite-
+            difference ``Rd`` / ``omega_d`` history.  This is useful for logging
+            the no-residual baseline command inside the force-vector environment.
+        """
         x = state["x"]
         v = state["v"]
         R = state["R"]
@@ -54,8 +79,18 @@ class Controller:
         ev = v - vd
 
         # NED geometric controller:
-        # A = kx ex + kv ev + m g e3 - m ad
-        A = self.kx @ ex + self.kv @ ev + self.mass * self.gravity * self.e3 - self.mass * ad
+        # A_base = kx ex + kv ev + m g e3 - m ad
+        A_base = self.kx @ ex + self.kv @ ev + self.mass * self.gravity * self.e3 - self.mass * ad
+
+        if force_residual is None:
+            delta_A = np.zeros(3, dtype=float)
+        else:
+            delta_A = np.asarray(force_residual, dtype=float).reshape(3)
+            if not np.all(np.isfinite(delta_A)):
+                raise ValueError("force_residual must contain finite values")
+
+        # Residual is injected HERE, before thrust-direction / attitude creation.
+        A = A_base + delta_A
 
         # Total thrust.
         f = float(A @ (R @ self.e3))
@@ -81,8 +116,9 @@ class Controller:
             omega_d = vee(so3_log(self.Rd_prev.T @ Rd)) / self.dt
             omega_d_dot = (omega_d - self.omega_d_prev) / self.dt
 
-        self.Rd_prev = Rd.copy()
-        self.omega_d_prev = omega_d.copy()
+        if update_history:
+            self.Rd_prev = Rd.copy()
+            self.omega_d_prev = omega_d.copy()
 
         eR = rotation_error(R, Rd)
         eOmega = omega - R.T @ Rd @ omega_d
@@ -103,6 +139,11 @@ class Controller:
             "eR": eR,
             "eOmega": eOmega,
             "Rd": Rd,
+            "omega_d": omega_d,
+            "omega_d_dot": omega_d_dot,
+            "A_base": A_base.copy(),
+            "A_cmd": A.copy(),
+            "force_residual": delta_A.copy(),
         }
 
         return f, M, info

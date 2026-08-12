@@ -60,6 +60,7 @@ class SAC:
             log_std_min=sac_cfg.log_std_min, log_std_max=sac_cfg.log_std_max,
             layernorm=net_cfg.actor_layernorm,
             zero_init_mean=net_cfg.zero_init_actor_mean,
+            initial_log_std=net_cfg.initial_log_std,
         ).to(self.device)
 
         self.critic = TwinCritic(obs_dim, action_dim, hidden=hidden,
@@ -87,9 +88,14 @@ class SAC:
     @torch.no_grad()
     def act(self, obs, deterministic=False):
         obs = torch.as_tensor(obs, device=self.device).float().unsqueeze(0)
-        action, _, mean = self.actor.sample(obs)
-        a = mean if deterministic else action
-        return a.squeeze(0).cpu().numpy()
+        if deterministic:
+            # Do not sample and then discard the sample: deterministic evaluation
+            # must not consume the training RNG stream.
+            mean, _ = self.actor(obs)
+            action = torch.tanh(mean)
+        else:
+            action, _, _ = self.actor.sample(obs)
+        return action.squeeze(0).cpu().numpy()
 
     def update(self, buffer):
         cfg = self.cfg
@@ -113,14 +119,18 @@ class SAC:
         nn.utils.clip_grad_norm_(self.critic.parameters(), cfg.grad_clip)
         self.critic_opt.step()
 
-        actor_loss = torch.tensor(0.0)
-        alpha_loss = torch.tensor(0.0)
+        actor_loss = torch.tensor(0.0, device=self.device)
+        alpha_loss = torch.tensor(0.0, device=self.device)
+        logp_mean = float("nan")
+        action_abs_mean = float("nan")
 
         # ---- delayed actor + alpha update ----
         if self._updates % cfg.policy_frequency == 0:
             # Compensate for the delay by doing policy_frequency actor steps.
             for _ in range(cfg.policy_frequency):
                 a_pi, logp, _ = self.actor.sample(obs)
+                logp_mean = float(logp.detach().mean().item())
+                action_abs_mean = float(a_pi.detach().abs().mean().item())
                 q1_pi, q2_pi = self.critic(obs, a_pi)
                 min_q_pi = torch.min(q1_pi, q2_pi)
                 actor_loss = (self.log_alpha.exp().detach() * logp - min_q_pi).mean()
@@ -130,8 +140,13 @@ class SAC:
                 nn.utils.clip_grad_norm_(self.actor.parameters(), cfg.grad_clip)
                 self.actor_opt.step()
 
-                # alpha update uses the fresh log-prob.
-                alpha_loss = -(self.log_alpha.exp() * (logp.detach() + self.target_entropy)).mean()
+                # Recompute log pi after the actor update so the temperature is
+                # adapted to the CURRENT policy rather than the pre-update policy.
+                with torch.no_grad():
+                    _, logp_alpha, _ = self.actor.sample(obs)
+                alpha_loss = -(
+                    self.log_alpha.exp() * (logp_alpha + self.target_entropy)
+                ).mean()
                 self.alpha_opt.zero_grad()
                 alpha_loss.backward()
                 self.alpha_opt.step()
@@ -148,14 +163,25 @@ class SAC:
             "actor_loss": float(actor_loss.item()),
             "alpha": self.alpha,
             "alpha_loss": float(alpha_loss.item()),
+            "q1_mean": float(q1.detach().mean().item()),
+            "q2_mean": float(q2.detach().mean().item()),
+            "target_q_mean": float(target_q.detach().mean().item()),
+            "logp_mean": logp_mean,
+            "policy_action_abs_mean": action_abs_mean,
         }
 
     def state_dict(self):
+        """Full trainable SAC state (the replay buffer is saved separately if desired)."""
         return {
             "actor": self.actor.state_dict(),
             "critic": self.critic.state_dict(),
             "critic_target": self.critic_target.state_dict(),
+            "actor_opt": self.actor_opt.state_dict(),
+            "critic_opt": self.critic_opt.state_dict(),
+            "alpha_opt": self.alpha_opt.state_dict(),
             "log_alpha": self.log_alpha.detach().cpu(),
+            "updates": int(self._updates),
+            "target_entropy": float(self.target_entropy),
         }
 
     def load_state_dict(self, sd):
@@ -164,3 +190,10 @@ class SAC:
         self.critic_target.load_state_dict(sd["critic_target"])
         with torch.no_grad():
             self.log_alpha.copy_(sd["log_alpha"].to(self.device))
+        if "actor_opt" in sd:
+            self.actor_opt.load_state_dict(sd["actor_opt"])
+        if "critic_opt" in sd:
+            self.critic_opt.load_state_dict(sd["critic_opt"])
+        if "alpha_opt" in sd:
+            self.alpha_opt.load_state_dict(sd["alpha_opt"])
+        self._updates = int(sd.get("updates", 0))

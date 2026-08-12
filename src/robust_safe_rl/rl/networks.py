@@ -1,9 +1,9 @@
 """SAC networks: squashed-Gaussian actor and twin Q critics.
 
-The actor outputs a tanh-squashed Gaussian; the raw action lives in [-1, 1]^4 and
-is scaled to physical residual bounds inside the environment. The mean head is
-zero-initialised so the policy starts as ~zero residual (pure base controller),
-following the residual-RL convention.
+The actor outputs a tanh-squashed Gaussian; the normalized action lives in
+[-1, 1]^4 and is scaled to physical residual bounds inside the environment. The
+mean head starts near zero, but the stochastic policy is intentionally initialized
+with a broad standard deviation for exploration.
 
 The critics are twin Q networks with optional LayerNorm between hidden layers
 (recommended: it stabilises value learning and curbs overestimation). Critic
@@ -38,7 +38,7 @@ class Actor(nn.Module):
 
     def __init__(self, obs_dim, action_dim, hidden=(512, 512),
                  log_std_min=LOG_STD_MIN_DEFAULT, log_std_max=LOG_STD_MAX_DEFAULT,
-                 layernorm=False, zero_init_mean=True):
+                 layernorm=False, zero_init_mean=True, initial_log_std=0.0):
         super().__init__()
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
@@ -57,9 +57,15 @@ class Actor(nn.Module):
         self.log_std_head = nn.Linear(last, action_dim)
 
         if zero_init_mean:
-            # Start with ~zero residual: small weights, zero bias on the mean head.
+            # Deterministic mean starts near zero residual.
             nn.init.uniform_(self.mean_head.weight, -1e-3, 1e-3)
             nn.init.zeros_(self.mean_head.bias)
+
+        # Make the initial stochastic policy deliberately broad and predictable:
+        # log_std = initial_log_std for every observation at initialization.
+        # With the default 0.0 this gives std=1 before tanh squashing.
+        nn.init.zeros_(self.log_std_head.weight)
+        nn.init.constant_(self.log_std_head.bias, float(initial_log_std))
 
     def forward(self, obs):
         h = self.trunk(obs)

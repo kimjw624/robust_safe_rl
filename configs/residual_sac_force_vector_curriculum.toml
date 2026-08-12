@@ -1,0 +1,84 @@
+# Force-vector residual SAC fixed-step curriculum.
+#
+# Disturbance stages, durations, rehearsal, and evaluation counts are intentionally
+# identical to residual_sac_curriculum.toml for a clean injection-level ablation.
+#
+# Edit this file to change stage duration or disturbance ranges. A stage change
+# only takes effect when the current episode finishes, so a single episode never
+# mixes two different randomization distributions.
+#
+# Anti-forgetting:
+#   * networks, optimizers, target critics, entropy temperature, and replay
+#     buffer are kept across every stage (nothing is reset);
+#   * after stage 1, this fraction of NEW episodes is sampled from a previously
+#     seen stage. With 0.25, 75% of episodes train the scheduled stage and 25%
+#     rehearse older stages.
+rehearsal_probability = 0.25
+rehearsal_mode = "uniform_previous"
+
+# Deterministic evaluation uses the same fixed seeds every time and evaluates
+# every stage seen so far. Increase later for final/report evaluation.
+evaluation_episodes_per_stage = 3
+
+# Total = 1,000,000 steps. Change individual durations freely; training uses the
+# sum of all stage timesteps when a curriculum file is enabled.
+
+[[stages]]
+name = "01_massmoi_mild"
+timesteps = 100000
+disturbances = ["massmoi"]
+k_min = 0.90
+k_max = 1.10
+
+[[stages]]
+name = "02_massmoi_full"
+timesteps = 100000
+disturbances = ["massmoi"]
+k_min = 0.70
+k_max = 1.30
+
+[[stages]]
+name = "03_add_force_mild"
+timesteps = 150000
+disturbances = ["massmoi", "force"]
+k_min = 0.70
+k_max = 1.30
+external_force_max = 1.0
+
+[[stages]]
+name = "04_force_full"
+timesteps = 150000
+disturbances = ["massmoi", "force"]
+k_min = 0.70
+k_max = 1.30
+external_force_max = 3.0
+
+[[stages]]
+name = "05_add_actuator_geometry_mild"
+timesteps = 200000
+disturbances = ["massmoi", "force", "motor_coeff", "moment_coeff", "arm_length"]
+k_min = 0.70
+k_max = 1.30
+external_force_max = 3.0
+motor_coeff_min = 0.90
+motor_coeff_max = 1.10
+moment_coeff_min = 0.90
+moment_coeff_max = 1.10
+arm_length_min = 0.90
+arm_length_max = 1.10
+per_motor_params = false
+
+[[stages]]
+name = "06_all_full"
+timesteps = 300000
+disturbances = ["massmoi", "force", "motor_coeff", "moment_coeff", "arm_length"]
+k_min = 0.70
+k_max = 1.30
+external_force_max = 3.0
+motor_coeff_min = 0.70
+motor_coeff_max = 1.30
+moment_coeff_min = 0.70
+moment_coeff_max = 1.30
+arm_length_min = 0.70
+arm_length_max = 1.30
+per_motor_params = false

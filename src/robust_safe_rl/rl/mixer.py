@@ -1,107 +1,219 @@
-"""x500 control-allocation mixer, for motor/geometry disturbance modeling.
+"""x500 control-allocation mixer for actuator/geometry disturbance modeling.
 
-Physically-faithful disturbance loop (matches how sim-to-real parameter error
-actually enters):
+The controller requests a body wrench ``w_cmd = [f, Mx, My, Mz]`` using the
+NOMINAL vehicle model.  The nominal allocator converts that wrench to nominal
+per-rotor thrust commands.  Those commands correspond to motor-speed-squared
+commands through ``T_nom = k_f,nom * omega^2``.  The same motor commands are
+then interpreted by the TRUE actuator/geometry model:
 
-    controller wants (f, M)
-      -> allocate to motor thrusts with the NOMINAL mixer:  u = B_nom^{-1} (f,M)
-      -> reconstruct the actual wrench with the TRUE mixer:  (f,M)_actual = B_true u
-      -> feed (f,M)_actual to the dynamics
+    w_cmd
+      -> nominal allocation:  T_cmd = B_nom^{-1} w_cmd
+      -> rotor saturation:    0 <= T_cmd <= k_f,nom * omega_max^2
+      -> actual wrench:       w_actual = B_true T_cmd
 
-The residual/disturbance is the gap opened by B_true != B_nom. When the true
-parameters equal nominal, the round-trip is the identity and the residual is
-exactly zero.
+This is the important physical relationship for coefficient/arm uncertainty:
+the flight controller/allocation logic still assumes nominal coefficients and
+geometry, while the true vehicle produces a different wrench from those same
+motor commands.
 
-Geometry (x500, physics-faithful from the gz model):
-    arm position L = 0.174 m along EACH body axis (symmetric X quad),
-    k_f = 8.54858e-6 N/(rad/s)^2 (motor thrust coefficient),
-    km_ratio = 0.016 (drag-torque-to-thrust ratio).
+Nominal x500 constants used here:
+    arm coordinate L = 0.174 m along each body x/y axis,
+    k_f = 8.54858e-6 N/(rad/s)^2,
+    momentConstant = 0.016, implemented as yaw drag torque / rotor thrust,
+    omega_max = 1000 rad/s.
 
-Note the arm value: 0.174 is the gz model's per-axis rotor position, not the
-PX4 allocator's (inconsistent) 0.13/0.22, and not the 0.246 diagonal.
-
-Disturbance parameters (perturb the TRUE mixer only):
-    k_f scale   : motor strength. Global (scalar) or per-motor (length-4).
-                  "thrust factor" scales k_f, which affects BOTH f and M through
-                  the allocation.
-    arm scale   : rotor arm position. Global (scalar) or per-rotor (length-4);
-                  scales the moment arms, so it affects M but not f.
+Supported TRUE-model perturbations (scalar or one value per rotor):
+    kf_scale       : scales motorConstant / thrust coefficient k_f.  Because
+                     yaw drag is momentConstant * thrust, this also scales yaw
+                     torque for a fixed momentConstant.
+    moment_scale   : independently scales momentConstant, affecting yaw torque
+                     only (on top of any k_f scaling).
+    arm_x, arm_y   : true rotor x/y moment-arm magnitudes. Scaling both by the
+                     same factor models an arm-length/geometry scale and affects
+                     roll/pitch moments but not collective thrust or yaw drag.
 """
 
 import numpy as np
 
 
-# x500 nominal mixer constants
-NOMINAL_ARM = 0.174           # m, per-axis rotor position (gz model)
+# x500 nominal actuator / mixer constants.
+NOMINAL_ARM = 0.174           # m, per-axis rotor position
 KF = 8.54858e-06              # N/(rad/s)^2
-KM_RATIO = 0.016              # drag torque = KM_RATIO * thrust
+KM_RATIO = 0.016              # momentConstant: yaw drag torque / rotor thrust
+MAX_ROT_VELOCITY = 1000.0     # rad/s
 
-# rotor sign pattern for the X configuration: (px_sign, py_sign, spin)
-# spin +1 = CCW, -1 = CW; motors 0..3
-_ROTOR_SIGNS = [(+1, +1, +1), (-1, -1, +1), (+1, -1, -1), (-1, +1, -1)]
+# The mixer uses nominal rotor thrust [N] as its motor-command coordinate. This
+# is k_f,nom * omega^2, so the physical motor-speed limit maps to this fixed cap
+# even when the TRUE k_f is uncertain.
+MAX_MOTOR_THRUST = KF * MAX_ROT_VELOCITY ** 2
+F_MAX = 4.0 * MAX_MOTOR_THRUST
+MX_MAX = 2.0 * NOMINAL_ARM * MAX_MOTOR_THRUST
+MY_MAX = MX_MAX
+MZ_MAX = 2.0 * KM_RATIO * MAX_MOTOR_THRUST
+M_MAX = np.array([MX_MAX, MY_MAX, MZ_MAX], dtype=float)
+
+# Rotor geometry in motor-number order:
+#   0: (+x, -y), CCW
+#   1: (-x, +y), CCW
+#   2: (+x, +y), CW
+#   3: (-x, -y), CW
+# spin +1 = CCW, -1 = CW.
+_ROTOR_SIGNS = [(+1, -1, +1), (-1, +1, +1), (+1, +1, -1), (-1, -1, -1)]
 
 
-def build_mixer(arm_x, arm_y=None, kf_scale=None, km_ratio=KM_RATIO):
-    """Build the 4x4 mixer B mapping motor COMMANDS to wrench [f, Mx, My, Mz].
-
-    arm_x, arm_y : scalar or length-4 arm positions (m). arm_y defaults to arm_x.
-    kf_scale     : scalar or length-4 multiplier on each motor's thrust coeff
-                   (1.0 = nominal). Scales that motor's contribution to f and M.
-    Returns B such that (f, Mx, My, Mz)^T = B @ motor_commands.
-    """
-    arm_x = np.atleast_1d(np.asarray(arm_x, dtype=float))
-    arm_y = arm_x if arm_y is None else np.atleast_1d(np.asarray(arm_y, dtype=float))
-    if arm_x.size == 1:
-        arm_x = np.full(4, arm_x[0])
-    if arm_y.size == 1:
-        arm_y = np.full(4, arm_y[0])
-    if kf_scale is None:
-        kf = np.ones(4)
+def _rotor_array(value, name, default=1.0):
+    """Return a finite length-4 rotor parameter array."""
+    if value is None:
+        arr = np.full(4, float(default), dtype=float)
     else:
-        kf = np.atleast_1d(np.asarray(kf_scale, dtype=float))
-        if kf.size == 1:
-            kf = np.full(4, kf[0])
+        arr = np.asarray(value, dtype=float).reshape(-1)
+        if arr.size == 1:
+            arr = np.full(4, float(arr[0]), dtype=float)
+        elif arr.size != 4:
+            raise ValueError(f"{name} must be a scalar or length-4 array")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must contain only finite values")
+    return arr
 
-    B = np.zeros((4, 4))
+
+def clip_wrench(f, M):
+    """Component-wise nominal-x500 wrench guard for code paths bypassing allocation.
+
+    This is only a box constraint. Coupled actuator feasibility is handled by
+    :class:`Mixer`, which clips the individual rotor commands instead.
+    """
+    f_sat = float(np.clip(float(f), 0.0, F_MAX))
+    M = np.asarray(M, dtype=float).reshape(3)
+    M_sat = np.clip(M, -M_MAX, M_MAX)
+    return f_sat, M_sat.copy()
+
+
+def build_mixer(arm_x, arm_y=None, kf_scale=None, moment_scale=None,
+                km_ratio=KM_RATIO):
+    """Build ``B`` mapping nominal rotor-thrust commands to body wrench.
+
+    Parameters
+    ----------
+    arm_x, arm_y:
+        Scalar or length-4 positive rotor-coordinate magnitudes [m]. ``arm_y``
+        defaults to ``arm_x``. Rotor quadrant signs are applied internally.
+    kf_scale:
+        Scalar or length-4 scale on the TRUE rotor thrust coefficient k_f.
+    moment_scale:
+        Scalar or length-4 scale on ``momentConstant`` (yaw torque / thrust).
+        A k_f change still changes yaw torque because yaw torque is proportional
+        to the actual rotor thrust; ``moment_scale`` changes the ratio itself.
+
+    Returns
+    -------
+    B : ndarray, shape (4, 4)
+        ``[f, Mx, My, Mz]^T = B @ T_nom_cmd``, where ``T_nom_cmd`` is the
+        nominal-equivalent per-rotor thrust ``k_f,nom * omega^2``.
+    """
+    ax = _rotor_array(arm_x, "arm_x")
+    ay = ax.copy() if arm_y is None else _rotor_array(arm_y, "arm_y")
+    kf = _rotor_array(kf_scale, "kf_scale", default=1.0)
+    km = _rotor_array(moment_scale, "moment_scale", default=1.0)
+
+    if np.any(ax < 0.0) or np.any(ay < 0.0):
+        raise ValueError("arm magnitudes must be nonnegative")
+    if np.any(kf < 0.0) or np.any(km < 0.0):
+        raise ValueError("coefficient scales must be nonnegative")
+
+    B = np.zeros((4, 4), dtype=float)
     for i, (sx, sy, spin) in enumerate(_ROTOR_SIGNS):
-        px, py = sx * arm_x[i], sy * arm_y[i]
-        B[0, i] = kf[i]                 # thrust
-        B[1, i] = kf[i] * py            # roll  Mx
-        B[2, i] = -kf[i] * px           # pitch My
-        B[3, i] = -spin * km_ratio * kf[i]   # yaw Mz (rotor drag reaction)
+        px, py = sx * ax[i], sy * ay[i]
+        thrust_gain = kf[i]
+        B[0, i] = thrust_gain
+        B[1, i] = thrust_gain * py
+        B[2, i] = -thrust_gain * px
+        B[3, i] = -spin * km_ratio * km[i] * thrust_gain
     return B
 
 
 class Mixer:
-    """Nominal/true mixer pair implementing the allocate-then-reconstruct loop."""
+    """Nominal allocator plus a configurable true actuator/geometry model.
 
-    def __init__(self):
+    ``max_motor_thrust`` defaults to the physical x500 limit.  The argument is
+    exposed primarily for controlled diagnostic experiments: increasing or
+    decreasing actuator headroom lets us test whether clipping/saturation is a
+    *necessary* trigger for a closed-loop oscillation.  Normal training and
+    evaluation code does not pass this argument, so its behavior is unchanged.
+    """
+
+    def __init__(self, max_motor_thrust=MAX_MOTOR_THRUST):
         self.B_nom = build_mixer(NOMINAL_ARM)
         self.B_nom_inv = np.linalg.inv(self.B_nom)
         self.B_true = self.B_nom.copy()
+        self.max_motor_thrust = float(max_motor_thrust)
+        if not np.isfinite(self.max_motor_thrust) or self.max_motor_thrust <= 0.0:
+            raise ValueError("max_motor_thrust must be finite and positive")
 
-    def set_true(self, kf_scale=None, arm_x=None, arm_y=None):
-        """Set the TRUE mixer's perturbed parameters (nominal stays fixed).
+    def set_motor_thrust_limit(self, max_motor_thrust):
+        """Set the per-rotor command limit used by the nominal allocator.
 
-        kf_scale : scalar or length-4 motor-strength multiplier (thrust factor).
-        arm_x/y  : scalar or length-4 arm positions; default to NOMINAL_ARM.
+        This is a diagnostic hook.  The true/nominal mixer matrices are not
+        modified; only the actuator clipping boundary changes.
+        """
+        value = float(max_motor_thrust)
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError("max_motor_thrust must be finite and positive")
+        self.max_motor_thrust = value
+        return self
+
+    def set_true(self, kf_scale=None, moment_scale=None, arm_x=None, arm_y=None):
+        """Set TRUE actuator/geometry parameters while keeping allocation nominal.
+
+        ``kf_scale`` and ``moment_scale`` may be scalars or length-4 arrays.
+        ``arm_x``/``arm_y`` are true positive coordinate magnitudes in metres;
+        when only ``arm_x`` is provided, the same magnitudes are used on y so a
+        scalar/per-rotor arm scale preserves each rotor's radial direction.
         """
         ax = NOMINAL_ARM if arm_x is None else arm_x
-        ay = arm_y
-        self.B_true = build_mixer(ax, ay, kf_scale=kf_scale)
+        self.B_true = build_mixer(
+            ax,
+            arm_y,
+            kf_scale=kf_scale,
+            moment_scale=moment_scale,
+        )
         return self
 
     def reset_true(self):
         self.B_true = self.B_nom.copy()
         return self
 
-    def apply(self, f, M):
-        """Allocate (f,M) with the nominal mixer, reconstruct with the true one.
+    def allocate(self, f, M):
+        """Allocate a requested wrench with the NOMINAL mixer and saturate rotors."""
+        M = np.asarray(M, dtype=float).reshape(3)
+        w_cmd = np.array([float(f), M[0], M[1], M[2]], dtype=float)
+        motor_cmd = self.B_nom_inv @ w_cmd
+        motor_sat = np.clip(motor_cmd, 0.0, self.max_motor_thrust)
+        saturated = bool(not np.allclose(motor_cmd, motor_sat, rtol=0.0, atol=1e-12))
+        return w_cmd, motor_cmd, motor_sat, saturated
 
-        Returns (f_actual, M_actual) -- the wrench the plant actually experiences.
-        Identity when B_true == B_nom.
+    def _apply_matrix(self, f, M, B, return_info=False):
+        w_cmd, motor_cmd, motor_sat, saturated = self.allocate(f, M)
+        w_actual = B @ motor_sat
+        result = (float(w_actual[0]), w_actual[1:4].copy())
+        if not return_info:
+            return result
+        info = {
+            "w_cmd": w_cmd.copy(),
+            "motor_cmd": motor_cmd.copy(),
+            "motor_sat": motor_sat.copy(),
+            "saturated": saturated,
+            "w_actual": w_actual.copy(),
+        }
+        return result[0], result[1], info
+
+    def apply(self, f, M, return_info=False):
+        """Apply nominal allocation followed by the TRUE actuator/geometry model."""
+        return self._apply_matrix(f, M, self.B_true, return_info=return_info)
+
+    def apply_nominal(self, f, M, return_info=False):
+        """Apply nominal allocation and reconstruct with the NOMINAL mixer.
+
+        This is useful for the reference twin: it receives the same physical
+        rotor saturation model but no actuator/geometry parameter mismatch.
         """
-        w = np.array([f, M[0], M[1], M[2]], dtype=float)
-        motors = self.B_nom_inv @ w          # what the controller commands
-        w_actual = self.B_true @ motors      # what the plant produces
-        return float(w_actual[0]), w_actual[1:4].copy()
+        return self._apply_matrix(f, M, self.B_nom, return_info=return_info)
